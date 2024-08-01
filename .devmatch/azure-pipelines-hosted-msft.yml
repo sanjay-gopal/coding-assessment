@@ -1,0 +1,100 @@
+
+trigger: none
+
+parameters:
+- name: devMatchSubmissionId
+  displayName: DevMatch Submission ID
+  type: string
+  default: NULL
+
+- name: devMatchRepoUrl
+  displayName: A DevMatch git repo
+  type: string
+  default: NULL
+
+variables:
+  DEVMATCH_SUBMISSION_ID: ${{ parameters.devMatchSubmissionId }}
+  DEVMATCH_USER_REPO_URL: ${{ parameters.devMatchRepoUrl }}
+  PYTHON_VERSION: 3.8.10
+  PYTHON_PATH: '/usr/bin/python3'
+
+pool:
+  name: Default
+
+steps:
+- task: CmdLine@2
+  inputs:
+    script: |
+      echo DEVMATCH_USER_REPO_URL = ${{ variables.DEVMATCH_USER_REPO_URL }}
+      echo DEVMATCH_SUBMISSION_ID = ${{ variables.DEVMATCH_SUBMISSION_ID }}
+  displayName: "DevMatch Debug Information"
+  condition: ne(variables['DEVMATCH_USER_REPO_URL'], 'NULL')
+
+# Now we overlay the user repo on top of the original repo
+# Save the original HEAD so that we can generated a diff later
+- script: |
+    git rev-parse HEAD > ORIGINAL_HEAD_COMMIT
+    echo "Repo to pull from ${{ variables.DEVMATCH_USER_REPO_URL }}"
+    # If the devmatch remote exists, then remove it.
+    git remote | grep -q "^devmatch$" && git remote rm devmatch
+    git remote add devmatch ${{ variables.DEVMATCH_USER_REPO_URL }}
+    git config user.email "build@devmatch.io"
+    git config user.name "Build Service"
+    git fetch devmatch
+    git pull --rebase devmatch master
+  condition: ne(variables['DEVMATCH_USER_REPO_URL'], 'NULL')
+  displayName: Overlay user repo
+  failOnStderr: false
+  continueOnError: false
+
+- script: |
+    cat ORIGINAL_HEAD_COMMIT
+    cat ORIGINAL_HEAD_COMMIT | git diff `xargs` > $(System.DefaultWorkingDirectory)/CODE-DIFF.DIFF
+  condition: ne(variables['DEVMATCH_USER_REPO_URL'], 'NULL')
+  displayName: Save code diff
+  failOnStderr: true
+
+# This is not needed in the self-hosted versions
+#- task: UsePythonVersion@0
+#  inputs:
+#    versionSpec: '${{ variables.PYTHON_VERSION }}'
+#  displayName: 'Use Python ${{ variables.PYTHON_VERSION }}'
+
+# normally we would do...
+# pip install -r requirements.txt
+- script: |
+    apt-get install -y python3-pip
+    python3 -m pip install --upgrade pip
+    pip3 install uvicorn
+    pip3 install fastapi
+    pip3 install python-multipart
+    pip3 install mozuma-clip # this package includes OpenAI's CLIP (pip3 install git+https://github.com/openai/CLIP.git)
+    # tests
+    pip3 install httpx
+    pip3 install pytest
+    pip3 install pytest-json-report
+  displayName: 'Install dependencies'
+
+- script: |
+    ln -s .devmatch/test.py test.py
+  displayName: 'link test source'
+
+- script: |
+    pytest test.py --json-report --json-report-file=report.json --json-report-indent=4
+  displayName: 'Run DevMatch test cases'
+
+- task: PublishBuildArtifacts@1
+  continueOnError: true
+  condition: always()
+  inputs:
+    PathtoPublish: '$(System.DefaultWorkingDirectory)/report.json'
+    ArtifactName: 'test-output'
+    publishLocation: Container
+
+- task: PublishBuildArtifacts@1
+  condition: ne(variables['DEVMATCH_USER_REPO_URL'], 'NULL')
+  inputs:
+    PathtoPublish: '$(System.DefaultWorkingDirectory)/CODE-DIFF.DIFF'
+    ArtifactName: 'code-diff'
+    publishLocation: Container
+
